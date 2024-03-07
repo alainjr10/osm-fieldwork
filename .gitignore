@@ -63,10 +63,10 @@ __pypackages__
 build
 dist
 
+hotosm-env/
+
 # Docs
 site
 .cache
 
 **/**/*customtiles*
-
-/hotosm-env/
