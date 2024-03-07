@@ -68,3 +68,5 @@ site
 .cache
 
 **/**/*customtiles*
+
+/hotosm-env/
