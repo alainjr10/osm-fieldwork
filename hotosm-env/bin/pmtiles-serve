@@ -1,0 +1,3 @@
+#!/home/dyce/Desktop/Outreachy/osm-fieldwork/hotosm-env/bin/python
+
+print('This command has been deprecated; see the "pmtiles serve" command at https://github.com/protomaps/go-pmtiles')

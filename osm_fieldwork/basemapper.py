@@ -21,7 +21,9 @@
 
 import argparse
 import concurrent.futures
+import json
 import logging
+import os
 import queue
 import re
 import sys
@@ -49,6 +51,8 @@ from shapely.ops import unary_union
 from osm_fieldwork.sqlite import DataFile, MapTile
 from osm_fieldwork.xlsforms import xlsforms_path
 from osm_fieldwork.yamlfile import YamlFile
+
+from io import BytesIO
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +133,7 @@ class BaseMapper(object):
         base: str,
         source: str,
         xy: bool,
+        is_bytes: bool  = False,
     ):
         """Create an tile basemap for ODK Collect.
 
@@ -142,7 +147,8 @@ class BaseMapper(object):
         Returns:
             (BaseMapper): An instance of this class
         """
-        self.bbox = self.makeBbox(boundary)
+        print('is bytes is ', is_bytes)
+        self.bbox = self.makeBbox(boundary, is_bytes)
         self.tiles = list()
         self.base = base
         # sources for imagery
@@ -273,6 +279,7 @@ class BaseMapper(object):
     def makeBbox(
         self,
         boundary: str,
+        is_bytes: bool,
     ) -> tuple[float, float, float, float]:
         """Make a bounding box from a shapely geometry.
 
@@ -283,36 +290,49 @@ class BaseMapper(object):
         Returns:
             (list): The bounding box coordinates
         """
-        if not boundary.lower().endswith((".json", ".geojson")):
-            # Is BBOX string
-            try:
-                if "," in boundary:
-                    bbox_parts = boundary.split(",")
-                else:
-                    bbox_parts = boundary.split(" ")
-                bbox = tuple(float(x) for x in bbox_parts)
-                if len(bbox) == 4:
-                    # BBOX valid
-                    return bbox
-                else:
-                    msg = f"BBOX string malformed: {bbox}"
+        
+        if(is_bytes):
+            print('\n boundary is a BytesIO object \n')
+            # log.debug(f"The bytes file: {boundary}")
+         
+            poly = geojson.loads(boundary)
+            if "features" in poly:
+                geometry = shape(poly["features"][0]["geometry"])
+            elif "geometry" in poly:
+                geometry = shape(poly["geometry"])
+            else:
+                geometry = shape(poly)
+        else:
+            if not boundary.lower().endswith((".json", ".geojson")):
+                # Is BBOX string
+                try:
+                    if "," in boundary:
+                        bbox_parts = boundary.split(",")
+                    else:
+                        bbox_parts = boundary.split(" ")
+                    bbox = tuple(float(x) for x in bbox_parts)
+                    if len(bbox) == 4:
+                        # BBOX valid
+                        return bbox
+                    else:
+                        msg = f"BBOX string malformed: {bbox}"
+                        log.error(msg)
+                        raise ValueError(msg) from None
+                except Exception as e:
+                    log.error(e)
+                    msg = f"Failed to parse BBOX string: {boundary}"
                     log.error(msg)
                     raise ValueError(msg) from None
-            except Exception as e:
-                log.error(e)
-                msg = f"Failed to parse BBOX string: {boundary}"
-                log.error(msg)
-                raise ValueError(msg) from None
 
-        log.debug(f"Reading geojson file: {boundary}")
-        with open(boundary, "r") as f:
-            poly = geojson.load(f)
-        if "features" in poly:
-            geometry = shape(poly["features"][0]["geometry"])
-        elif "geometry" in poly:
-            geometry = shape(poly["geometry"])
-        else:
-            geometry = shape(poly)
+            log.debug(f"Reading geojson file: {boundary}")
+            with open(boundary, "r") as f:
+                poly = geojson.load(f)
+            if "features" in poly:
+                geometry = shape(poly["features"][0]["geometry"])
+            elif "geometry" in poly:
+                geometry = shape(poly["geometry"])
+            else:
+                geometry = shape(poly)
 
         if isinstance(geometry, list):
             # Multiple geometries
@@ -410,6 +430,7 @@ def create_basemap_file(
     verbose=False,
     boundary=None,
     tms=None,
+    is_bytes=False,
     xy=False,
     outfile=None,
     zooms="12-17",
@@ -492,8 +513,7 @@ def create_basemap_file(
         err = "You need to specify a source!"
         log.error(err)
         raise ValueError(err)
-
-    basemap = BaseMapper(boundary, tiledir, source, xy)
+    basemap = BaseMapper(boundary, tiledir, source, xy, is_bytes)
 
     if tms:
         # Add TMS URL to sources for download
@@ -557,6 +577,7 @@ def main():
         choices=["esri", "bing", "topo", "google", "oam"],
         help="Imagery source",
     )
+    parser.add_argument("-y", "--bytes", action=argparse.BooleanOptionalAction, help="Wether this input should be treated as bytes")
     args = parser.parse_args()
 
     if not args.boundary:
@@ -568,23 +589,30 @@ def main():
         log.error("You need to specify a source!")
         parser.print_help()
         quit()
+    
+    if(args.bytes):
+        bytes_arg_value: str = args.boundary[0]
+        bytes_data = bytes_arg_value.encode(sys.getfilesystemencoding())
 
-    if len(args.boundary) == 1:
-        if Path(args.boundary[0]).suffix not in [".json", ".geojson"]:
+        print('\n boundary is a BytesIO object \n')
+        boundary_parsed = bytes_data.decode()
+    else:        
+        if len(args.boundary) == 1:
+            if Path(args.boundary[0]).suffix not in [".json", ".geojson"]:
+                log.error("")
+                log.error("*Error*: the boundary file must have .json or .geojson extension")
+                log.error("")
+                parser.print_help()
+                quit()
+            boundary_parsed = args.boundary[0]
+        elif len(args.boundary) == 4:
+            boundary_parsed = ",".join(args.boundary)
+        else:
             log.error("")
-            log.error("*Error*: the boundary file must have .json or .geojson extension")
+            log.error("*Error*: the bounding box must have 4 coordinates")
             log.error("")
             parser.print_help()
             quit()
-        boundary_parsed = args.boundary[0]
-    elif len(args.boundary) == 4:
-        boundary_parsed = ",".join(args.boundary)
-    else:
-        log.error("")
-        log.error("*Error*: the bounding box must have 4 coordinates")
-        log.error("")
-        parser.print_help()
-        quit()
 
     create_basemap_file(
         verbose=args.verbose,
@@ -592,6 +620,7 @@ def main():
         tms=args.tms,
         xy=args.xy,
         outfile=args.outfile,
+        is_bytes=args.bytes,
         zooms=args.zooms,
         outdir=args.outdir,
         source=args.source,
